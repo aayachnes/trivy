@@ -71,6 +71,8 @@ type Parser struct {
 	snapshotRemoteRepos []string
 	offline             bool
 	servers             []Server
+	visitedArtifacts    set.Set[string] // Track visited artifacts to detect cycles
+	resolvingDepMgmt    set.Set[string] // Track artifacts being resolved in dependency management
 }
 
 func NewParser(filePath string, opts ...option) *Parser {
@@ -99,6 +101,8 @@ func NewParser(filePath string, opts ...option) *Parser {
 		snapshotRemoteRepos: o.snapshotRemoteRepos,
 		offline:             o.offline,
 		servers:             s.Servers,
+		visitedArtifacts:    set.New[string](),
+		resolvingDepMgmt:    set.New[string](),
 	}
 }
 
@@ -125,7 +129,13 @@ func (p *Parser) Parse(r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependenc
 	rootArt := root.artifact()
 	rootArt.Relationship = ftypes.RelationshipRoot
 
-	return p.parseRoot(rootArt, set.New[string]())
+	packages, dependencies, parseErr := p.parseRoot(rootArt, set.New[string]())
+	
+	// Clear visited artifacts after parsing is complete
+	p.visitedArtifacts = set.New[string]()
+	p.resolvingDepMgmt = set.New[string]()
+	
+	return packages, dependencies, parseErr
 }
 
 // nolint: gocyclo
@@ -319,6 +329,18 @@ func (p *Parser) resolve(art artifact, rootDepManagement []pomDependency) (analy
 		}, nil
 	}
 
+	// Check for cycles before resolving
+	artifactKey := art.String()
+	if p.visitedArtifacts.Contains(artifactKey) {
+		p.logger.Debug("Cycle detected, skipping resolution", log.String("artifact", artifactKey))
+		return analysisResult{
+			artifact: art,
+		}, nil
+	}
+
+	// Mark artifact as visited
+	p.visitedArtifacts.Append(artifactKey)
+
 	p.logger.Debug("Resolving...", log.String("group_id", art.GroupID),
 		log.String("artifact_id", art.ArtifactID), log.String("version", art.Version.String()))
 	pomContent, err := p.tryRepository(art.GroupID, art.ArtifactID, art.Version.String())
@@ -388,6 +410,19 @@ func (p *Parser) analyze(pom *pom, opts analysisOptions) (analysisResult, error)
 func (p *Parser) resolveParent(pom *pom) error {
 	if pom.nil() {
 		return nil
+	}
+
+	// Check for parent cycles
+	if pom.content.Parent.GroupId != "" && pom.content.Parent.ArtifactId != "" && pom.content.Parent.Version != "" {
+		parentKey := fmt.Sprintf("%s:%s:%s", pom.content.Parent.GroupId, pom.content.Parent.ArtifactId, pom.content.Parent.Version)
+		if p.visitedArtifacts.Contains(parentKey) {
+			p.logger.Debug("Parent cycle detected, skipping parent resolution", log.String("parent", parentKey))
+			return nil
+		}
+		
+		// Mark parent as visited
+		p.visitedArtifacts.Append(parentKey)
+		defer p.visitedArtifacts.Remove(parentKey) // Remove after processing
 	}
 
 	// Parse parent POM
@@ -475,8 +510,20 @@ func (p *Parser) resolveDepManagement(props map[string]string, depManagement []p
 	// cf. https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html#importing-dependencies
 	for _, imp := range imports {
 		art := newArtifact(imp.GroupID, imp.ArtifactID, imp.Version, nil, props)
+		
+		// Check for cycles in dependency management resolution
+		artKey := art.String()
+		if p.resolvingDepMgmt.Contains(artKey) {
+			p.logger.Debug("Dependency management cycle detected, skipping", log.String("artifact", artKey))
+			continue
+		}
+		
+		// Mark as being resolved
+		p.resolvingDepMgmt.Append(artKey)
+		
 		result, err := p.resolve(art, nil)
 		if err != nil {
+			p.resolvingDepMgmt.Remove(artKey)
 			continue
 		}
 
@@ -489,6 +536,9 @@ func (p *Parser) resolveDepManagement(props map[string]string, depManagement []p
 			result.dependencyManagement[k] = dd.Resolve(newProps, nil, nil)
 		}
 		newDepManagement = p.mergeDependencyManagements(newDepManagement, result.dependencyManagement)
+		
+		// Remove from being resolved
+		p.resolvingDepMgmt.Remove(artKey)
 	}
 	return newDepManagement
 }

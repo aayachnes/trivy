@@ -2138,6 +2138,55 @@ func TestPom_Parse(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:      "BOM import cycle detection",
+			inputFile: filepath.Join("testdata", "bom-import-cycle", "pom.xml"),
+			local:     true,
+			want: []ftypes.Package{
+				{
+					ID:           "com.example:bom-import-cycle:1.0.0",
+					Name:         "com.example:bom-import-cycle",
+					Version:      "1.0.0",
+					Relationship: ftypes.RelationshipRoot,
+				},
+			},
+		},
+		{
+			name:      "Spring Boot parent cycle detection",
+			inputFile: filepath.Join("testdata", "spring-boot-cycle", "pom.xml"),
+			local:     true,
+			want: []ftypes.Package{
+				{
+					ID:           "com.example:spring-boot-cycle-test:1.0.0",
+					Name:         "com.example:spring-boot-cycle-test",
+					Version:      "1.0.0",
+					Relationship: ftypes.RelationshipRoot,
+				},
+				{
+					ID:           "io.prometheus:simpleclient:0.16.0",
+					Name:         "io.prometheus:simpleclient",
+					Version:      "0.16.0",
+					Relationship: ftypes.RelationshipDirect,
+					Locations:    ftypes.Locations{{StartLine: 25, EndLine: 28}},
+				},
+				{
+					ID:           "org.springframework.boot:spring-boot-starter:2.7.6",
+					Name:         "org.springframework.boot:spring-boot-starter",
+					Version:      "2.7.6",
+					Relationship: ftypes.RelationshipDirect,
+					Locations:    ftypes.Locations{{StartLine: 20, EndLine: 23}},
+				},
+			},
+			wantDeps: []ftypes.Dependency{
+				{
+					ID: "com.example:spring-boot-cycle-test:1.0.0",
+					DependsOn: []string{
+						"io.prometheus:simpleclient:0.16.0",
+						"org.springframework.boot:spring-boot-starter:2.7.6",
+					},
+				},
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
