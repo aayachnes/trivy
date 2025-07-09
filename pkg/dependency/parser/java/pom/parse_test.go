@@ -1497,7 +1497,7 @@ func TestPom_Parse(t *testing.T) {
 			},
 		},
 		{
-			name:      "compare ArtifactIDs for base and parent pom's",
+			name:      "compare ArtifactIDs for base and parent poms",
 			inputFile: filepath.Join("testdata", "no-parent-infinity-loop", "pom.xml"),
 			local:     true,
 			want: []ftypes.Package{
@@ -1509,6 +1509,11 @@ func TestPom_Parse(t *testing.T) {
 					Relationship: ftypes.RelationshipRoot,
 				},
 			},
+		}, {
+			name:      "compare GroupIDs for base and parent poms",
+			inputFile: filepath.Join("testdata", "no-parent-infinity-loop-same-artifact-id", "pom.xml"),
+			local:     true,
+			want:      nil,
 		},
 		{
 			name:      "dependency without version",
