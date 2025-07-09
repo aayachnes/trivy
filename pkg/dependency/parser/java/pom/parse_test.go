@@ -1497,7 +1497,7 @@ func TestPom_Parse(t *testing.T) {
 			},
 		},
 		{
-			name:      "compare ArtifactIDs for base and parent pom's",
+			name:      "compare ArtifactIDs for base and parent poms",
 			inputFile: filepath.Join("testdata", "no-parent-infinity-loop", "pom.xml"),
 			local:     true,
 			want: []ftypes.Package{
@@ -1506,6 +1506,18 @@ func TestPom_Parse(t *testing.T) {
 					Name:         "com.example:child",
 					Version:      "1.0.0",
 					Licenses:     []string{"The Apache Software License, Version 2.0"},
+					Relationship: ftypes.RelationshipRoot,
+				},
+			},
+		}, {
+			name:      "compare GroupIDs for base and parent poms",
+			inputFile: filepath.Join("testdata", "no-parent-infinity-loop-same-artifact-id", "beans", "pom.xml"),
+			local:     true,
+			want: []ftypes.Package{
+				{
+					ID:           "com.finastra.summit.xva.integration:beans:3.0.0-SNAPSHOT",
+					Name:         "com.finastra.summit.xva.integration:beans",
+					Version:      "3.0.0-SNAPSHOT",
 					Relationship: ftypes.RelationshipRoot,
 				},
 			},

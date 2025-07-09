@@ -583,7 +583,7 @@ func (p *Parser) retrieveParent(currentPath, relativePath string, target artifac
 		}
 	}
 
-	// If not found, search the parent director
+	// If not found, search the parent directory
 	pom, err := p.tryRelativePath(target, currentPath, "../pom.xml")
 	if err != nil {
 		errs = multierror.Append(errs, err)
@@ -611,13 +611,18 @@ func (p *Parser) tryRelativePath(parentArtifact artifact, currentPath, relativeP
 
 	// To avoid an infinite loop or parsing the wrong parent when using relatedPath or `../pom.xml`,
 	// we need to compare GAV of `parentArtifact` (`parent` tag from base pom) and GAV of pom from `relativePath`.
-	// See `compare ArtifactIDs for base and parent pom's` test for example.
-	// But GroupID can be inherited from parent (`p.analyze` function is required to get the GroupID).
-	// Version can contain a property (`p.analyze` function is required to get the GroupID).
-	// So we can only match ArtifactID's.
-	if pom.artifact().ArtifactID != parentArtifact.ArtifactID {
-		return nil, xerrors.New("'parent.relativePath' points at wrong local POM")
+	// See `compare ArtifactIDs for base and parent poms` and 'compare GroupIDs for base and parent poms' tests for examples.
+
+	pomArtifact := pom.artifact()
+
+	if pomArtifact.GroupID != parentArtifact.GroupID {
+		return nil, xerrors.New("'parent.relativePath' points at wrong local POM (GroupID Mismatch)")
 	}
+
+	if pomArtifact.ArtifactID != parentArtifact.ArtifactID {
+		return nil, xerrors.New("'parent.relativePath' points at wrong local POM (ArtifactID Mismatch)")
+	}
+
 	result, err := p.analyze(pom, analysisOptions{})
 	if err != nil {
 		return nil, xerrors.Errorf("analyze error: %w", err)
