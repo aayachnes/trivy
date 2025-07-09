@@ -145,8 +145,7 @@ func (p *Parser) Parse(r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependenc
 		content:  content,
 	}
 
-	// Analyze root POM
-	result, err := p.analyze(root, analysisOptions{lineNumber: true})
+	result, err := p.analyze(root, analysisOptions{lineNumber: true}, map[string]struct{}{})
 	if err != nil {
 		return nil, nil, xerrors.Errorf("analyze error (%s): %w", p.rootPath, err)
 	}
@@ -154,10 +153,10 @@ func (p *Parser) Parse(r xio.ReadSeekerAt) ([]ftypes.Package, []ftypes.Dependenc
 	// Cache root POM
 	p.cache.put(result.artifact, result)
 
-	return p.parseRoot(root.artifact(), make(map[string]struct{}))
+	return p.parseRoot(root.artifact(), make(map[string]struct{}), map[string]struct{}{})
 }
 
-func (p *Parser) parseRoot(root artifact, uniqModules map[string]struct{}) ([]ftypes.Package, []ftypes.Dependency, error) {
+func (p *Parser) parseRoot(root artifact, uniqModules map[string]struct{}, visitedLocalPaths map[string]struct{}) ([]ftypes.Package, []ftypes.Dependency, error) {
 	// Prepare a queue for dependencies
 	queue := newArtifactQueue()
 
@@ -186,7 +185,7 @@ func (p *Parser) parseRoot(root artifact, uniqModules map[string]struct{}) ([]ft
 			}
 			uniqModules[art.String()] = struct{}{}
 
-			modulePkgs, moduleDeps, err := p.parseRoot(art, uniqModules)
+			modulePkgs, moduleDeps, err := p.parseRoot(art, uniqModules, visitedLocalPaths)
 			if err != nil {
 				return nil, nil, err
 			}
@@ -214,14 +213,14 @@ func (p *Parser) parseRoot(root artifact, uniqModules map[string]struct{}) ([]ft
 			}
 		}
 
-		result, err := p.resolve(art, rootDepManagement)
+		result, err := p.resolve(art, rootDepManagement, visitedLocalPaths)
 		if err != nil {
 			return nil, nil, xerrors.Errorf("resolve error (%s): %w", art, err)
 		}
 
 		if art.Relationship == ftypes.RelationshipRoot {
 			// Managed dependencies in the root POM affect transitive dependencies
-			rootDepManagement = p.resolveDepManagement(result.properties, result.dependencyManagement)
+			rootDepManagement = p.resolveDepManagement(result.properties, result.dependencyManagement, visitedLocalPaths)
 
 			// mark its dependencies as "direct"
 			result.dependencies = lo.Map(result.dependencies, func(dep artifact, _ int) artifact {
@@ -232,7 +231,7 @@ func (p *Parser) parseRoot(root artifact, uniqModules map[string]struct{}) ([]ft
 
 		// Parse, cache, and enqueue modules.
 		for _, relativePath := range result.modules {
-			moduleArtifact, err := p.parseModule(result.filePath, relativePath)
+			moduleArtifact, err := p.parseModule(result.filePath, relativePath, visitedLocalPaths)
 			if err != nil {
 				p.logger.Debug("Unable to parse the module",
 					log.FilePath(result.filePath), log.Err(err))
@@ -305,15 +304,15 @@ func depVersion(depName string, uniqArtifacts map[string]artifact) string {
 	return ""
 }
 
-func (p *Parser) parseModule(currentPath, relativePath string) (artifact, error) {
+func (p *Parser) parseModule(currentPath, relativePath string, visitedLocalPaths map[string]struct{}) (artifact, error) {
 	// modulePath: "root/" + "module/" => "root/module"
-	p.logger.Debug("parseModule", log.String("currentPath", currentPath), log.String("relativePath", relativePath))
+	p.logger.Debug("parseModule", log.String("currentPath", currentPath), log.String("relativePath", relativePath), log.String("visitedLocalPaths", fmt.Sprintf("%v", visitedLocalPaths)))
 	module, err := p.openRelativePom(currentPath, relativePath)
 	if err != nil {
 		return artifact{}, xerrors.Errorf("unable to open the relative path: %w", err)
 	}
 
-	result, err := p.analyze(module, analysisOptions{})
+	result, err := p.analyze(module, analysisOptions{}, visitedLocalPaths)
 	if err != nil {
 		return artifact{}, xerrors.Errorf("analyze error: %w", err)
 	}
@@ -326,7 +325,7 @@ func (p *Parser) parseModule(currentPath, relativePath string) (artifact, error)
 	return moduleArtifact, nil
 }
 
-func (p *Parser) resolve(art artifact, rootDepManagement []pomDependency) (analysisResult, error) {
+func (p *Parser) resolve(art artifact, rootDepManagement []pomDependency, visitedLocalPaths map[string]struct{}) (analysisResult, error) {
 	p.logger.Debug("resolve", log.String("artifact", art.String()))
 	// If the artifact is found in cache, it is returned.
 	if result := p.cache.get(art); result != nil {
@@ -351,7 +350,7 @@ func (p *Parser) resolve(art artifact, rootDepManagement []pomDependency) (analy
 	result, err := p.analyze(pomContent, analysisOptions{
 		exclusions:    art.Exclusions,
 		depManagement: rootDepManagement,
-	})
+	}, visitedLocalPaths)
 	if err != nil {
 		return analysisResult{}, xerrors.Errorf("analyze error: %w", err)
 	}
@@ -375,13 +374,22 @@ type analysisOptions struct {
 	lineNumber    bool            // Save line numbers
 }
 
-func (p *Parser) analyze(pom *pom, opts analysisOptions) (analysisResult, error) {
+func (p *Parser) analyze(pom *pom, opts analysisOptions, visitedLocalPaths map[string]struct{}) (analysisResult, error) {
 	if pom == nil || pom.content == nil {
 		p.logger.Debug("analyze: pom is nil, skipping")
 		return analysisResult{}, nil
 	}
 
-	p.logger.Debug("analyze", log.String("pom", pom.String()))
+	p.logger.Debug("analyze", log.String("pom.filePath", pom.filePath), log.String("pom", pom.String()))
+
+	if pom.filePath != "" {
+		if _, seen := visitedLocalPaths[pom.filePath]; seen {
+			p.logger.Warn("analyze: pom already analyzed, skipping...", log.String("pom.filePath", pom.filePath))
+			return analysisResult{}, nil
+		}
+
+		visitedLocalPaths[pom.filePath] = struct{}{}
+	}
 
 	// Update remoteRepositories
 	pomReleaseRemoteRepos, pomSnapshotRemoteRepos := pom.repositories(p.servers)
@@ -402,7 +410,7 @@ func (p *Parser) analyze(pom *pom, opts analysisOptions) (analysisResult, error)
 
 	// Parent
 	p.logger.Debug("analyze: parseParent", log.String("pom.filePath", pom.filePath), log.String("parent", pom.content.Parent.String()), log.Int("numDepManagement", len(depManagementForParent)))
-	parent, err := p.parseParent(pom.filePath, pom.content.Parent, depManagementForParent)
+	parent, err := p.parseParent(pom.filePath, pom.content.Parent, depManagementForParent, visitedLocalPaths)
 	if err != nil {
 		return analysisResult{}, xerrors.Errorf("parent error: %w", err)
 	}
@@ -424,7 +432,7 @@ func (p *Parser) analyze(pom *pom, opts analysisOptions) (analysisResult, error)
 
 	// Merge dependencies. Child dependencies must be preferred than parent dependencies.
 	// Parents don't have to resolve dependencies.
-	deps := p.parseDependencies(pom.content.Dependencies.Dependency, props, depManagement, opts)
+	deps := p.parseDependencies(pom.content.Dependencies.Dependency, props, depManagement, opts, visitedLocalPaths)
 	p.logger.Debug("analyze: parseDependencies success")
 	deps = p.mergeDependencies(parent.dependencies, deps, opts.exclusions)
 	p.logger.Debug("analyze: mergeDependencies success")
@@ -456,7 +464,7 @@ func (p *Parser) mergeDependencyManagements(depManagements ...[]pomDependency) [
 }
 
 func (p *Parser) parseDependencies(deps []pomDependency, props map[string]string, depManagement []pomDependency,
-	opts analysisOptions) []artifact {
+	opts analysisOptions, visitedLocalPaths map[string]struct{}) []artifact {
 	// Imported POMs often have no dependencies, so dependencyManagement resolution can be skipped.
 	if len(deps) == 0 {
 		return nil
@@ -464,7 +472,7 @@ func (p *Parser) parseDependencies(deps []pomDependency, props map[string]string
 
 	// Resolve dependencyManagement
 	p.logger.Debug("parseDependencies: resolveDepManagement...")
-	depManagement = p.resolveDepManagement(props, depManagement)
+	depManagement = p.resolveDepManagement(props, depManagement, visitedLocalPaths)
 	p.logger.Debug("parseDependencies: resolveDepManagement success")
 	rootDepManagement := opts.depManagement
 	var dependencies []artifact
@@ -483,7 +491,7 @@ func (p *Parser) parseDependencies(deps []pomDependency, props map[string]string
 	return dependencies
 }
 
-func (p *Parser) resolveDepManagement(props map[string]string, depManagement []pomDependency) []pomDependency {
+func (p *Parser) resolveDepManagement(props map[string]string, depManagement []pomDependency, visitedLocalPaths map[string]struct{}) []pomDependency {
 	var newDepManagement, imports []pomDependency
 	for _, dep := range depManagement {
 		// cf. https://howtodoinjava.com/maven/maven-dependency-scopes/#import
@@ -499,7 +507,7 @@ func (p *Parser) resolveDepManagement(props map[string]string, depManagement []p
 	// cf. https://maven.apache.org/guides/introduction/introduction-to-dependency-mechanism.html#importing-dependencies
 	for _, imp := range imports {
 		art := newArtifact(imp.GroupID, imp.ArtifactID, imp.Version, nil, props)
-		result, err := p.resolve(art, nil)
+		result, err := p.resolve(art, nil, visitedLocalPaths)
 		if err != nil {
 			continue
 		}
@@ -507,7 +515,7 @@ func (p *Parser) resolveDepManagement(props map[string]string, depManagement []p
 		// We need to recursively check all nested depManagements,
 		// so that we don't miss dependencies on nested depManagements with `Import` scope.
 		newProps := utils.MergeMaps(props, result.properties)
-		result.dependencyManagement = p.resolveDepManagement(newProps, result.dependencyManagement)
+		result.dependencyManagement = p.resolveDepManagement(newProps, result.dependencyManagement, visitedLocalPaths)
 		for k, dd := range result.dependencyManagement {
 			// Evaluate variables and overwrite dependencyManagement
 			result.dependencyManagement[k] = dd.Resolve(newProps, nil, nil)
@@ -551,7 +559,7 @@ func excludeDep(exclusions map[string]struct{}, art artifact) bool {
 	return false
 }
 
-func (p *Parser) parseParent(currentPath string, parent pomParent, rootDepManagement []pomDependency) (analysisResult, error) {
+func (p *Parser) parseParent(currentPath string, parent pomParent, rootDepManagement []pomDependency, visitedLocalPaths map[string]struct{}) (analysisResult, error) {
 	p.logger.Debug("parseParent", log.String("currentPath", currentPath), log.String("parent", parent.String()), log.Int("numRootDeps", len(rootDepManagement)))
 	// Pass nil properties so that variables in <parent> are not evaluated.
 	target := newArtifact(parent.GroupId, parent.ArtifactId, parent.Version, nil, nil)
@@ -571,7 +579,7 @@ func (p *Parser) parseParent(currentPath string, parent pomParent, rootDepManage
 	}
 
 	logger.Debug("parseParent: retrieving parent")
-	parentPOM, err := p.retrieveParent(currentPath, parent.RelativePath, target)
+	parentPOM, err := p.retrieveParent(currentPath, parent.RelativePath, target, visitedLocalPaths)
 	if err != nil {
 		logger.Debug("Parent POM not found", log.Err(err))
 	}
@@ -579,7 +587,7 @@ func (p *Parser) parseParent(currentPath string, parent pomParent, rootDepManage
 	logger.Debug("parseParent: analyzing parent POM")
 	result, err := p.analyze(parentPOM, analysisOptions{
 		depManagement: rootDepManagement,
-	})
+	}, visitedLocalPaths)
 	if err != nil {
 		return analysisResult{}, xerrors.Errorf("analyze error: %w", err)
 	}
@@ -589,7 +597,7 @@ func (p *Parser) parseParent(currentPath string, parent pomParent, rootDepManage
 	return result, nil
 }
 
-func (p *Parser) retrieveParent(currentPath, relativePath string, target artifact) (*pom, error) {
+func (p *Parser) retrieveParent(currentPath, relativePath string, target artifact, visitedLocalPaths map[string]struct{}) (*pom, error) {
 	p.logger.Debug("retrieveParent", log.String("currentPath", currentPath), log.String("relativePath", relativePath), log.String("target", target.String()))
 
 	var errs error
@@ -597,7 +605,7 @@ func (p *Parser) retrieveParent(currentPath, relativePath string, target artifac
 	// Try relativePath
 	if relativePath != "" {
 		p.logger.Debug("retrieveParent: tryRelativePath, path=" + relativePath)
-		pom, err := p.tryRelativePath(target, currentPath, relativePath)
+		pom, err := p.tryRelativePath(target, currentPath, relativePath, visitedLocalPaths)
 		if err != nil {
 			p.logger.Debug("retrieveParent: tryRelativePath error", log.Err(err))
 			errs = multierror.Append(errs, err)
@@ -609,7 +617,7 @@ func (p *Parser) retrieveParent(currentPath, relativePath string, target artifac
 
 	// If not found, search the parent directory
 	p.logger.Debug("retrieveParent: tryRelativePath, path=../pom.xml")
-	pom, err := p.tryRelativePath(target, currentPath, "../pom.xml")
+	pom, err := p.tryRelativePath(target, currentPath, "../pom.xml", visitedLocalPaths)
 	if err != nil {
 		p.logger.Debug("retrieveParent: tryRelativePath error", log.Err(err))
 		errs = multierror.Append(errs, err)
@@ -634,7 +642,7 @@ func (p *Parser) retrieveParent(currentPath, relativePath string, target artifac
 	return nil, errs
 }
 
-func (p *Parser) tryRelativePath(parentArtifact artifact, currentPath, relativePath string) (*pom, error) {
+func (p *Parser) tryRelativePath(parentArtifact artifact, currentPath, relativePath string, visitedLocalPaths map[string]struct{}) (*pom, error) {
 	p.logger.Debug("tryRelativePath", log.String("parentArtifact", parentArtifact.String()), log.String("currentPath", currentPath), log.String("relativePath", relativePath))
 
 	pom, err := p.openRelativePom(currentPath, relativePath)
@@ -655,7 +663,7 @@ func (p *Parser) tryRelativePath(parentArtifact artifact, currentPath, relativeP
 		return nil, xerrors.New("'parent.relativePath' points at wrong local POM")
 	}
 
-	result, err := p.analyze(pom, analysisOptions{})
+	result, err := p.analyze(pom, analysisOptions{}, visitedLocalPaths)
 	if err != nil {
 		return nil, xerrors.Errorf("analyze error: %w", err)
 	}

@@ -190,6 +190,10 @@ type pomParent struct {
 
 func (p pomParent) String() string {
 	if p.GroupId == "" && p.ArtifactId == "" && p.Version == "" {
+		if p.RelativePath != "" {
+			return p.RelativePath
+		}
+
 		return ""
 	}
 
