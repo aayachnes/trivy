@@ -154,6 +154,14 @@ func (p pom) repositories(servers []Server) ([]string, []string) {
 	return releaseRepos, snapshotRepos
 }
 
+func (p pom) String() string {
+	return fmt.Sprintf("%s:%s:%s",
+		p.content.GroupId,
+		p.content.ArtifactId,
+		p.content.Version,
+	)
+}
+
 type pomXML struct {
 	Parent     pomParent   `xml:"parent"`
 	GroupId    string      `xml:"groupId"`
@@ -178,6 +186,14 @@ type pomParent struct {
 	ArtifactId   string `xml:"artifactId"`
 	Version      string `xml:"version"`
 	RelativePath string `xml:"relativePath"`
+}
+
+func (p pomParent) String() string {
+	if p.GroupId == "" && p.ArtifactId == "" && p.Version == "" {
+		return ""
+	}
+
+	return fmt.Sprintf("%s:%s:%s", p.GroupId, p.ArtifactId, p.Version)
 }
 
 type pomLicenses struct {
